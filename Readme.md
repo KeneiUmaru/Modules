@@ -77,6 +77,8 @@ myProperty:disconnectAll()
 ### Examples
 
 ```lua
+Properties = loadstring(game:HttpGet("https://raw.githubusercontent.com/KeneiUmaru/Modules/main/Properties.lua"))()
+
 -- Example usage with validation and callbacks
 local temperature = Properties.new(25)
 
