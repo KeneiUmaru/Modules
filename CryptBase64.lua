@@ -68,7 +68,7 @@ end
 function CustomCrypt.base64Dec(self, data)
     if not data then return end
     
-    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    local b = '1234567890abcdef'
     
     data = string.gsub(self:deCustomCrypt(data:split("!")), '[^'..b..'=]', '')
     
