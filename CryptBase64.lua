@@ -47,7 +47,7 @@ end
 function CustomCrypt.base64Enc(self, data)
     if not data then return end
     
-    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    local b = 'abcdef0123456789'
     
     return table.concat(self:CustomCrypt((data:gsub('.', function(x) 
         local r, b = '', x:byte()
