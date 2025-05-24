@@ -281,10 +281,24 @@ end
 function ObjectESP:SetColor(color)
     self.Color = color
     if ESPConfig.Mode == "Drawing" then
-        self.Box.Color = color
-        self.NameText.Color = color
+        if self.Box then self.Box.Color = color end
+        if self.NameText then self.NameText.Color = color end
     elseif ESPConfig.Mode == "Billboard" then
-        self.NameLabel.TextColor3 = color
+        if self.NameLabel then self.NameLabel.TextColor3 = color end
+    end
+end
+
+function ObjectESP:Toggle()
+    self.Enabled = not self.Enabled
+    if not self.Enabled then
+        self:SetVisible(false)
+    end
+end
+
+function ObjectESP:SetEnabled(enabled)
+    self.Enabled = enabled
+    if not self.Enabled then
+        self:SetVisible(false)
     end
 end
 local DrawingESP = {}
@@ -454,12 +468,24 @@ function DrawingESP:SetVisible(visible)
     self.HealthBarOutline.Visible = visible and ESPConfig.ShowHealth
 end
 
-function DrawingESP:Remove()
-    self.Box:Remove()
-    self.NameText:Remove()
-    self.DistanceText:Remove()
-    self.HealthBar:Remove()
-    self.HealthBarOutline:Remove()
+function DrawingESP:SetColor(color)
+    self.Color = color
+    if self.Box then self.Box.Color = color end
+    if self.NameText then self.NameText.Color = color end
+end
+
+function DrawingESP:Toggle()
+    self.Enabled = not self.Enabled
+    if not self.Enabled then
+        self:SetVisible(false)
+    end
+end
+
+function DrawingESP:SetEnabled(enabled)
+    self.Enabled = enabled
+    if not self.Enabled then
+        self:SetVisible(false)
+    end
 end
 
 -- Billboard ESP Class
