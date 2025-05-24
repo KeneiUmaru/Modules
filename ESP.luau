@@ -47,7 +47,11 @@ local ESPConfig = {
 local ESPObjects = {}
 local CustomESPObjects = {}
 
--- Custom Object ESP Class (for non-player objects)
+function BillboardESP:Remove()
+    if self.BillboardGui then
+        self.BillboardGui:Destroy()
+    end
+end
 local ObjectESP = {}
 ObjectESP.__index = ObjectESP
 
@@ -160,8 +164,12 @@ function ObjectESP:CreateBillboardObjects()
 end
 
 function ObjectESP:Update()
-    if not self.Object or not self.Object.Parent then
-        self:Remove()
+    if not self.Object or not self.Object.Parent or not self.Enabled then
+        if not self.Enabled then
+            self:SetVisible(false)
+        else
+            self:Remove()
+        end
         return
     end
     
@@ -260,11 +268,11 @@ end
 
 function ObjectESP:SetVisible(visible)
     if ESPConfig.Mode == "Drawing" then
-        self.Box.Visible = visible and ESPConfig.ShowBoxes
-        self.NameText.Visible = visible and ESPConfig.ShowNames
-        self.DistanceText.Visible = visible and ESPConfig.ShowDistance
+        if self.Box then self.Box.Visible = visible and ESPConfig.ShowBoxes and self.Enabled end
+        if self.NameText then self.NameText.Visible = visible and ESPConfig.ShowNames and self.Enabled end
+        if self.DistanceText then self.DistanceText.Visible = visible and ESPConfig.ShowDistance and self.Enabled end
     elseif ESPConfig.Mode == "Billboard" then
-        self.BillboardGui.Enabled = visible
+        if self.BillboardGui then self.BillboardGui.Enabled = visible and self.Enabled end
     end
 end
 
@@ -346,8 +354,12 @@ function DrawingESP.new(player)
 end
 
 function DrawingESP:Update()
-    if not self.Player or not self.Player.Parent then
-        self:Remove()
+    if not self.Player or not self.Player.Parent or not self.Enabled then
+        if not self.Enabled then
+            self:SetVisible(false)
+        else
+            self:Remove()
+        end
         return
     end
     
@@ -461,11 +473,11 @@ function DrawingESP:GetColor()
 end
 
 function DrawingESP:SetVisible(visible)
-    self.Box.Visible = visible and ESPConfig.ShowBoxes
-    self.NameText.Visible = visible and ESPConfig.ShowNames
-    self.DistanceText.Visible = visible and ESPConfig.ShowDistance
-    self.HealthBar.Visible = visible and ESPConfig.ShowHealth
-    self.HealthBarOutline.Visible = visible and ESPConfig.ShowHealth
+    if self.Box then self.Box.Visible = visible and ESPConfig.ShowBoxes and self.Enabled end
+    if self.NameText then self.NameText.Visible = visible and ESPConfig.ShowNames and self.Enabled end
+    if self.DistanceText then self.DistanceText.Visible = visible and ESPConfig.ShowDistance and self.Enabled end
+    if self.HealthBar then self.HealthBar.Visible = visible and ESPConfig.ShowHealth and self.Enabled end
+    if self.HealthBarOutline then self.HealthBarOutline.Visible = visible and ESPConfig.ShowHealth and self.Enabled end
 end
 
 function DrawingESP:SetColor(color)
@@ -570,8 +582,12 @@ function BillboardESP.new(player)
 end
 
 function BillboardESP:Update()
-    if not self.Player or not self.Player.Parent then
-        self:Remove()
+    if not self.Player or not self.Player.Parent or not self.Enabled then
+        if not self.Enabled then
+            self.BillboardGui.Enabled = false
+        else
+            self:Remove()
+        end
         return
     end
     
@@ -652,9 +668,36 @@ function BillboardESP:GetColor()
     end
 end
 
-function BillboardESP:Remove()
+function DrawingESP:Remove()
+    self.Box:Remove()
+    self.NameText:Remove()
+    self.DistanceText:Remove()
+    self.HealthBar:Remove()
+    self.HealthBarOutline:Remove()
+end
+
+function BillboardESP:SetColor(color)
+    self.Color = color
+    if self.NameLabel then self.NameLabel.TextColor3 = color end
+end
+
+function BillboardESP:Toggle()
+    self.Enabled = not self.Enabled
+    if not self.Enabled then
+        self:SetVisible(false)
+    end
+end
+
+function BillboardESP:SetEnabled(enabled)
+    self.Enabled = enabled
+    if not self.Enabled then
+        self:SetVisible(false)
+    end
+end
+
+function BillboardESP:SetVisible(visible)
     if self.BillboardGui then
-        self.BillboardGui:Destroy()
+        self.BillboardGui.Enabled = visible and self.Enabled
     end
 end
 
@@ -685,30 +728,37 @@ end
 function CreateESP.AddObject(object, name, color)
     if typeof(object) == "table" then
         -- Handle table of objects
+        local espObjects = {}
         for i, obj in pairs(object) do
             if typeof(obj) == "Instance" then
                 local objName = name and (name .. "_" .. i) or nil
-                CreateESP.AddObject(obj, objName, color)
+                local espObj = CreateESP.AddObject(obj, objName, color)
+                if espObj then
+                    table.insert(espObjects, espObj)
+                end
             end
         end
-        return
+        return espObjects
     end
     
     if typeof(object) ~= "Instance" then
         warn("CreateESP.AddObject: Expected Instance or table of Instances")
-        return
+        return nil
     end
     
     if CustomESPObjects[object] then 
         warn("CreateESP.AddObject: Object already has ESP")
-        return 
+        return CustomESPObjects[object]
     end
     
     local espObject = ObjectESP.new(object, name, color)
     if espObject then
         CustomESPObjects[object] = espObject
         print("Added ESP for object:", object.Name)
+        return espObject
     end
+    
+    return nil
 end
 
 function CreateESP.RemoveObject(object)
@@ -733,6 +783,7 @@ end
 function CreateESP.AddObjectsByName(name, parent, color)
     parent = parent or Workspace
     local objects = {}
+    local espObjects = {}
     
     local function findObjects(container)
         for _, child in pairs(container:GetChildren()) do
@@ -746,18 +797,24 @@ function CreateESP.AddObjectsByName(name, parent, color)
     findObjects(parent)
     
     if #objects > 0 then
-        CreateESP.AddObject(objects, name, color)
+        for i, obj in pairs(objects) do
+            local espObj = CreateESP.AddObject(obj, name .. "_" .. i, color)
+            if espObj then
+                table.insert(espObjects, espObj)
+            end
+        end
         print("Added ESP for", #objects, "objects named:", name)
     else
         warn("No objects found with name:", name)
     end
     
-    return objects
+    return espObjects
 end
 
 function CreateESP.AddObjectsByClass(className, parent, color)
     parent = parent or Workspace
     local objects = {}
+    local espObjects = {}
     
     local function findObjects(container)
         for _, child in pairs(container:GetChildren()) do
@@ -771,13 +828,18 @@ function CreateESP.AddObjectsByClass(className, parent, color)
     findObjects(parent)
     
     if #objects > 0 then
-        CreateESP.AddObject(objects, className, color)
+        for i, obj in pairs(objects) do
+            local espObj = CreateESP.AddObject(obj, className .. "_" .. i, color)
+            if espObj then
+                table.insert(espObjects, espObj)
+            end
+        end
         print("Added ESP for", #objects, "objects of class:", className)
     else
         warn("No objects found with class:", className)
     end
     
-    return objects
+    return espObjects
 end
 
 function CreateESP.ClearCustomObjects()
