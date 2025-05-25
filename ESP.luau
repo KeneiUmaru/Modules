@@ -1,970 +1,563 @@
--- CreateESP Module for Roblox
--- Supports both Drawing and Billboard modes
--- Author: Assistant
-
-local CreateESP = {}
-CreateESP.__index = CreateESP
+-- ESP Module System with Config Management
+local ESPModule = {}
 
 -- Services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local UserInputService = game:GetService("UserInputService")
+local workspace = game:GetService("Workspace")
+local players = game:GetService("Players")
+local runService = game:GetService("RunService")
+local player = players.LocalPlayer
+local camera = workspace.CurrentCamera
 
--- Local player reference
-local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
-
--- ESP Configuration
-local ESPConfig = {
-    Enabled = true,
-    Mode = "Drawing", -- "Drawing" or "Billboard"
-    ShowBoxes = true,
-    ShowNames = true,
-    ShowDistance = true,
-    ShowHealth = true,
-    ShowTeammates = false,
-    MaxDistance = 1000,
+-- Default Settings
+local DEFAULT_SETTINGS = {
+    Box_Color = Color3.fromRGB(255, 0, 0),
+    Box_Thickness = 2,
+    Box_Transparency = 1,
     
-    -- Drawing mode colors
-    BoxColor = Color3.fromRGB(255, 255, 255),
-    NameColor = Color3.fromRGB(255, 255, 255),
-    HealthColor = Color3.fromRGB(0, 255, 0),
-    TeamColor = Color3.fromRGB(0, 255, 0),
-    EnemyColor = Color3.fromRGB(255, 0, 0),
+    Tracers = true,
+    Tracer_Color = Color3.fromRGB(255, 255, 255),
+    Tracer_Thickness = 2,
+    Tracer_Transparency = 1,
     
-    -- Drawing properties
-    BoxThickness = 1,
-    TextSize = 16,
-    Transparency = 1,
+    Shifter_Color = Color3.fromRGB(0, 255, 0),
     
-    -- Billboard properties
-    BillboardSize = UDim2.new(0, 200, 0, 100),
-    StudsOffset = Vector3.new(0, 2, 0)
+    Autothickness = true,
+    Team_Check = false,
+    
+    red = Color3.fromRGB(240, 20, 20),
+    green = Color3.fromRGB(90, 215, 25),
+    black = Color3.fromRGB(0, 0, 0)
 }
 
--- Storage for ESP objects
-local ESPObjects = {}
-local CustomESPObjects = {}
+-- Global ESP Configuration Manager
+local ESPConfig = {
+    instances = {},
+    globalSettings = DEFAULT_SETTINGS
+}
 
-function BillboardESP:Remove()
-    if self.BillboardGui then
-        self.BillboardGui:Destroy()
-    end
+-- Utility Functions
+local function Lerp(a, b, t)
+    return a + (b - a) * t
 end
-local ObjectESP = {}
-ObjectESP.__index = ObjectESP
 
-function ObjectESP.new(object, name, color)
-    local self = setmetatable({}, ObjectESP)
+local function NewLine(thickness, color)
+    local line = Drawing.new("Line")
+    line.Visible = false
+    line.From = Vector2.new(0, 0)
+    line.To = Vector2.new(0, 0)
+    line.Color = color or DEFAULT_SETTINGS.Box_Color
+    line.Thickness = thickness or DEFAULT_SETTINGS.Box_Thickness
+    line.Transparency = 1
+    return line
+end
+
+-- ESP Class
+local ESP = {}
+ESP.__index = ESP
+
+function ESP.new(targetPlayer, color, settings)
+    local self = setmetatable({}, ESP)
     
-    self.Object = object
-    self.Name = name or (object.Name ~= "" and object.Name or "Object")
-    self.Color = color or Color3.fromRGB(255, 255, 0) -- Default yellow
-    self.Enabled = true
+    self.target = targetPlayer
+    self.color = color or DEFAULT_SETTINGS.Box_Color
+    self.settings = settings or DEFAULT_SETTINGS
+    self.visible = true
+    self.connection = nil
     
-    -- Determine object type and get position function
-    if object:IsA("BasePart") then
-        self.GetPosition = function() return object.Position end
-        self.GetSize = function() return object.Size end
-    elseif object:IsA("Model") and object.PrimaryPart then
-        self.GetPosition = function() return object.PrimaryPart.Position end
-        self.GetSize = function() return object.PrimaryPart.Size end
-    elseif object:IsA("Model") and object:FindFirstChild("HumanoidRootPart") then
-        self.GetPosition = function() return object.HumanoidRootPart.Position end
-        self.GetSize = function() return object.HumanoidRootPart.Size end
-    elseif object:IsA("Model") then
-        -- Try to find the first BasePart
-        local part = object:FindFirstChildOfClass("BasePart")
-        if part then
-            self.GetPosition = function() return part.Position end
-            self.GetSize = function() return part.Size end
-        else
-            warn("ObjectESP: Could not find a suitable part in model " .. object.Name)
-            return nil
-        end
-    else
-        warn("ObjectESP: Unsupported object type " .. object.ClassName)
-        return nil
+    -- Create drawing objects
+    self.lines = {}
+    for i = 1, 12 do
+        self.lines["line" .. i] = NewLine(self.settings.Box_Thickness, self.color)
     end
     
-    if ESPConfig.Mode == "Drawing" then
-        self:CreateDrawingObjects()
-    elseif ESPConfig.Mode == "Billboard" then
-        self:CreateBillboardObjects()
-    end
+    self.lines.Tracer = NewLine(self.settings.Tracer_Thickness, self.settings.Tracer_Color)
+    self.lines.healthbar = NewLine(3, self.settings.black)
+    self.lines.greenhealth = NewLine(1.5, self.settings.black)
+    
+    -- Shifter quad
+    self.shifter = Drawing.new("Quad")
+    self.shifter.Visible = false
+    self.shifter.Color = self.settings.Shifter_Color
+    self.shifter.Thickness = self.settings.Box_Thickness
+    self.shifter.Filled = false
+    self.shifter.Transparency = self.settings.Box_Transparency
+    
+    -- Animation variables
+    self.debounce = 0
+    self.shifteroffset = 0
+    
+    -- Register with config manager
+    ESPConfig.instances[self] = true
     
     return self
 end
 
-function ObjectESP:CreateDrawingObjects()
-    -- Create drawing objects
-    self.Box = Drawing.new("Square")
-    self.Box.Visible = false
-    self.Box.Filled = false
-    self.Box.Thickness = ESPConfig.BoxThickness
-    self.Box.Transparency = ESPConfig.Transparency
-    self.Box.Color = self.Color
+function ESP:UpdateSettings(newSettings)
+    -- Merge new settings with existing ones
+    for key, value in pairs(newSettings) do
+        self.settings[key] = value
+    end
     
-    self.NameText = Drawing.new("Text")
-    self.NameText.Visible = false
-    self.NameText.Center = true
-    self.NameText.Outline = true
-    self.NameText.Font = 2
-    self.NameText.Size = ESPConfig.TextSize
-    self.NameText.Color = self.Color
+    -- Update drawing objects with new settings
+    for i = 1, 12 do
+        self.lines["line" .. i].Thickness = self.settings.Box_Thickness
+        self.lines["line" .. i].Color = self.settings.Box_Color
+    end
     
-    self.DistanceText = Drawing.new("Text")
-    self.DistanceText.Visible = false
-    self.DistanceText.Center = true
-    self.DistanceText.Outline = true
-    self.DistanceText.Font = 2
-    self.DistanceText.Size = ESPConfig.TextSize - 2
-    self.DistanceText.Color = Color3.fromRGB(200, 200, 200)
+    self.lines.Tracer.Thickness = self.settings.Tracer_Thickness
+    self.lines.Tracer.Color = self.settings.Tracer_Color
+    self.lines.Tracer.Transparency = self.settings.Tracer_Transparency
+    
+    self.shifter.Color = self.settings.Shifter_Color
+    self.shifter.Thickness = self.settings.Box_Thickness
+    self.shifter.Transparency = self.settings.Box_Transparency
 end
 
-function ObjectESP:CreateBillboardObjects()
-    -- Create billboard GUI
-    self.BillboardGui = Instance.new("BillboardGui")
-    self.BillboardGui.Size = ESPConfig.BillboardSize
-    self.BillboardGui.StudsOffset = ESPConfig.StudsOffset
-    self.BillboardGui.AlwaysOnTop = true
-    
-    -- Main frame
-    self.Frame = Instance.new("Frame")
-    self.Frame.Size = UDim2.new(1, 0, 1, 0)
-    self.Frame.BackgroundTransparency = 1
-    self.Frame.Parent = self.BillboardGui
-    
-    -- Name label
-    self.NameLabel = Instance.new("TextLabel")
-    self.NameLabel.Size = UDim2.new(1, 0, 0.4, 0)
-    self.NameLabel.Position = UDim2.new(0, 0, 0, 0)
-    self.NameLabel.BackgroundTransparency = 1
-    self.NameLabel.Text = self.Name
-    self.NameLabel.TextColor3 = self.Color
-    self.NameLabel.TextScaled = true
-    self.NameLabel.TextStrokeTransparency = 0
-    self.NameLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    self.NameLabel.Font = Enum.Font.GothamBold
-    self.NameLabel.Parent = self.Frame
-    
-    -- Distance label
-    self.DistanceLabel = Instance.new("TextLabel")
-    self.DistanceLabel.Size = UDim2.new(1, 0, 0.3, 0)
-    self.DistanceLabel.Position = UDim2.new(0, 0, 0.4, 0)
-    self.DistanceLabel.BackgroundTransparency = 1
-    self.DistanceLabel.Text = "0m"
-    self.DistanceLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    self.DistanceLabel.TextScaled = true
-    self.DistanceLabel.TextStrokeTransparency = 0
-    self.DistanceLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    self.DistanceLabel.Font = Enum.Font.Gotham
-    self.DistanceLabel.Parent = self.Frame
-end
-
-function ObjectESP:Update()
-    if not self.Object or not self.Object.Parent or not self.Enabled then
-        if not self.Enabled then
-            self:SetVisible(false)
-        else
-            self:Remove()
-        end
+function ESP:UpdateESP()
+    if not self.target or 
+       not self.target:FindFirstChild("Humanoid") or
+       not self.target:FindFirstChild("HumanoidRootPart") or
+       not self.target:FindFirstChild("Head") or
+       self.target.Name == player.Name or
+       self.target.Humanoid.Health <= 0 then
+        self:Hide()
         return
     end
     
-    local position = self.GetPosition()
-    if not position then
-        self:SetVisible(false)
+    local pos, vis = camera:WorldToViewportPoint(self.target.HumanoidRootPart.Position)
+    local head = camera:WorldToViewportPoint(self.target.Head.Position)
+    local DistanceY = math.clamp((Vector2.new(head.X, head.Y) - Vector2.new(pos.X, pos.Y)).magnitude, 2, math.huge)
+    
+    if not vis then
+        self:Hide()
         return
     end
     
-    -- Check distance
-    local distance = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and 
-                     (LocalPlayer.Character.HumanoidRootPart.Position - position).Magnitude) or math.huge
+    local Scale = self.target.Head.Size.Y/2
+    local Size = Vector3.new(2, 3, 1.5) * (Scale * 2)
     
-    if distance > ESPConfig.MaxDistance then
-        self:SetVisible(false)
-        return
-    end
+    -- Calculate 3D box corners
+    local corners = self:Calculate3DBox(Size)
     
-    if ESPConfig.Mode == "Drawing" then
-        self:UpdateDrawing(position, distance)
-    elseif ESPConfig.Mode == "Billboard" then
-        self:UpdateBillboard(position, distance)
-    end
-end
-
-function ObjectESP:UpdateDrawing(position, distance)
-    -- Get screen position
-    local screenPosition, onScreen = Camera:WorldToViewportPoint(position)
+    -- Update box lines
+    self:UpdateBoxLines(corners)
     
-    if not onScreen then
-        self:SetVisible(false)
-        return
-    end
-    
-    -- Calculate box dimensions based on object size
-    local objectSize = self.GetSize()
-    local sizeY = math.max(objectSize.Y, objectSize.X, objectSize.Z)
-    local boxHeight = math.max(40, sizeY * 50 / distance)
-    local boxWidth = boxHeight * 0.8
-    
-    -- Update box
-    if ESPConfig.ShowBoxes then
-        self.Box.Size = Vector2.new(boxWidth, boxHeight)
-        self.Box.Position = Vector2.new(screenPosition.X - boxWidth/2, screenPosition.Y - boxHeight/2)
-        self.Box.Visible = true
-    else
-        self.Box.Visible = false
-    end
-    
-    -- Update name
-    if ESPConfig.ShowNames then
-        self.NameText.Text = self.Name
-        self.NameText.Position = Vector2.new(screenPosition.X, screenPosition.Y - boxHeight/2 - 20)
-        self.NameText.Visible = true
-    else
-        self.NameText.Visible = false
-    end
-    
-    -- Update distance
-    if ESPConfig.ShowDistance then
-        self.DistanceText.Text = string.format("%.0fm", distance)
-        self.DistanceText.Position = Vector2.new(screenPosition.X, screenPosition.Y + boxHeight/2 + 5)
-        self.DistanceText.Visible = true
-    else
-        self.DistanceText.Visible = false
-    end
-end
-
-function ObjectESP:UpdateBillboard(position, distance)
-    -- Attach to object
-    local targetPart = self.Object:IsA("BasePart") and self.Object or 
-                      (self.Object:IsA("Model") and (self.Object.PrimaryPart or self.Object:FindFirstChildOfClass("BasePart")))
-    
-    if targetPart and self.BillboardGui.Parent ~= targetPart then
-        self.BillboardGui.Parent = targetPart
-    end
-    
-    if not targetPart then
-        self.BillboardGui.Enabled = false
-        return
-    end
-    
-    self.BillboardGui.Enabled = true
-    
-    -- Update distance
-    if ESPConfig.ShowDistance then
-        self.DistanceLabel.Text = string.format("%.0fm", distance)
-        self.DistanceLabel.Visible = true
-    else
-        self.DistanceLabel.Visible = false
-    end
-    
-    -- Update name visibility
-    self.NameLabel.Visible = ESPConfig.ShowNames
-end
-
-function ObjectESP:SetVisible(visible)
-    if ESPConfig.Mode == "Drawing" then
-        if self.Box then self.Box.Visible = visible and ESPConfig.ShowBoxes and self.Enabled end
-        if self.NameText then self.NameText.Visible = visible and ESPConfig.ShowNames and self.Enabled end
-        if self.DistanceText then self.DistanceText.Visible = visible and ESPConfig.ShowDistance and self.Enabled end
-    elseif ESPConfig.Mode == "Billboard" then
-        if self.BillboardGui then self.BillboardGui.Enabled = visible and self.Enabled end
-    end
-end
-
-function ObjectESP:Remove()
-    if ESPConfig.Mode == "Drawing" then
-        if self.Box then self.Box:Remove() end
-        if self.NameText then self.NameText:Remove() end
-        if self.DistanceText then self.DistanceText:Remove() end
-    elseif ESPConfig.Mode == "Billboard" then
-        if self.BillboardGui then self.BillboardGui:Destroy() end
-    end
-end
-
-function ObjectESP:SetColor(color)
-    self.Color = color
-    if ESPConfig.Mode == "Drawing" then
-        if self.Box then self.Box.Color = color end
-        if self.NameText then self.NameText.Color = color end
-    elseif ESPConfig.Mode == "Billboard" then
-        if self.NameLabel then self.NameLabel.TextColor3 = color end
-    end
-end
-
-function ObjectESP:Toggle()
-    self.Enabled = not self.Enabled
-    if not self.Enabled then
-        self:SetVisible(false)
-    end
-end
-
-function ObjectESP:SetEnabled(enabled)
-    self.Enabled = enabled
-    if not self.Enabled then
-        self:SetVisible(false)
-    end
-end
-local DrawingESP = {}
-DrawingESP.__index = DrawingESP
-
-function DrawingESP.new(player)
-    local self = setmetatable({}, DrawingESP)
-    
-    self.Player = player
-    self.Enabled = true
-    
-    -- Create drawing objects
-    self.Box = Drawing.new("Square")
-    self.Box.Visible = false
-    self.Box.Filled = false
-    self.Box.Thickness = ESPConfig.BoxThickness
-    self.Box.Transparency = ESPConfig.Transparency
-    
-    self.NameText = Drawing.new("Text")
-    self.NameText.Visible = false
-    self.NameText.Center = true
-    self.NameText.Outline = true
-    self.NameText.Font = 2
-    self.NameText.Size = ESPConfig.TextSize
-    
-    self.DistanceText = Drawing.new("Text")
-    self.DistanceText.Visible = false
-    self.DistanceText.Center = true
-    self.DistanceText.Outline = true
-    self.DistanceText.Font = 2
-    self.DistanceText.Size = ESPConfig.TextSize - 2
-    
-    self.HealthBar = Drawing.new("Square")
-    self.HealthBar.Visible = false
-    self.HealthBar.Filled = true
-    self.HealthBar.Thickness = 1
-    
-    self.HealthBarOutline = Drawing.new("Square")
-    self.HealthBarOutline.Visible = false
-    self.HealthBarOutline.Filled = false
-    self.HealthBarOutline.Thickness = 1
-    self.HealthBarOutline.Color = Color3.fromRGB(0, 0, 0)
-    
-    return self
-end
-
-function DrawingESP:Update()
-    if not self.Player or not self.Player.Parent or not self.Enabled then
-        if not self.Enabled then
-            self:SetVisible(false)
-        else
-            self:Remove()
-        end
-        return
-    end
-    
-    local character = self.Player.Character
-    if not character or not character:FindFirstChild("HumanoidRootPart") then
-        self:SetVisible(false)
-        return
-    end
-    
-    local humanoid = character:FindFirstChild("Humanoid")
-    if not humanoid then
-        self:SetVisible(false)
-        return
-    end
-    
-    local rootPart = character.HumanoidRootPart
-    local head = character:FindFirstChild("Head")
-    
-    -- Check distance
-    local distance = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and 
-                     (LocalPlayer.Character.HumanoidRootPart.Position - rootPart.Position).Magnitude) or math.huge
-    
-    if distance > ESPConfig.MaxDistance then
-        self:SetVisible(false)
-        return
-    end
-    
-    -- Check team
-    if not ESPConfig.ShowTeammates and self.Player.Team == LocalPlayer.Team and self.Player ~= LocalPlayer then
-        self:SetVisible(false)
-        return
-    end
-    
-    -- Get screen position
-    local rootPosition, rootOnScreen = Camera:WorldToViewportPoint(rootPart.Position)
-    local headPosition = head and Camera:WorldToViewportPoint(head.Position + Vector3.new(0, head.Size.Y/2, 0))
-    
-    if not rootOnScreen then
-        self:SetVisible(false)
-        return
-    end
-    
-    -- Calculate box dimensions
-    local topY = headPosition and headPosition.Y or rootPosition.Y - 20
-    local bottomY = rootPosition.Y + 20
-    local boxHeight = math.abs(topY - bottomY)
-    local boxWidth = boxHeight * 0.6
-    
-    -- Update box
-    if ESPConfig.ShowBoxes then
-        self.Box.Size = Vector2.new(boxWidth, boxHeight)
-        self.Box.Position = Vector2.new(rootPosition.X - boxWidth/2, topY)
-        self.Box.Color = self:GetColor()
-        self.Box.Visible = true
-    else
-        self.Box.Visible = false
-    end
-    
-    -- Update name
-    if ESPConfig.ShowNames then
-        self.NameText.Text = self.Player.Name
-        self.NameText.Position = Vector2.new(rootPosition.X, topY - 20)
-        self.NameText.Color = self:GetColor()
-        self.NameText.Visible = true
-    else
-        self.NameText.Visible = false
-    end
-    
-    -- Update distance
-    if ESPConfig.ShowDistance then
-        self.DistanceText.Text = string.format("%.0fm", distance)
-        self.DistanceText.Position = Vector2.new(rootPosition.X, bottomY + 5)
-        self.DistanceText.Color = Color3.fromRGB(200, 200, 200)
-        self.DistanceText.Visible = true
-    else
-        self.DistanceText.Visible = false
+    -- Update tracer
+    if self.settings.Tracers then
+        self:UpdateTracer(Size)
     end
     
     -- Update health bar
-    if ESPConfig.ShowHealth then
-        local healthPercent = humanoid.Health / humanoid.MaxHealth
-        local barHeight = boxHeight * 0.8
-        local barWidth = 4
+    self:UpdateHealthBar(pos, DistanceY)
+    
+    -- Update team colors
+    if self.settings.Team_Check then
+        self:UpdateTeamColors()
+    end
+    
+    -- Update shifter animation
+    self:UpdateShifter(Size)
+    
+    -- Update thickness based on distance
+    if self.settings.Autothickness then
+        self:UpdateAutoThickness()
+    end
+    
+    -- Show all elements
+    self:Show()
+end
+
+function ESP:Calculate3DBox(Size)
+    local rootPart = self.target.HumanoidRootPart
+    
+    return {
+        Top1 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, Size.Y, -Size.Z)).p),
+        Top2 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, Size.Y, Size.Z)).p),
+        Top3 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(Size.X, Size.Y, Size.Z)).p),
+        Top4 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(Size.X, Size.Y, -Size.Z)).p),
         
-        -- Health bar background
-        self.HealthBarOutline.Size = Vector2.new(barWidth + 2, barHeight + 2)
-        self.HealthBarOutline.Position = Vector2.new(rootPosition.X - boxWidth/2 - barWidth - 4, topY + (boxHeight - barHeight)/2 - 1)
-        self.HealthBarOutline.Visible = true
-        
-        -- Health bar
-        self.HealthBar.Size = Vector2.new(barWidth, barHeight * healthPercent)
-        self.HealthBar.Position = Vector2.new(rootPosition.X - boxWidth/2 - barWidth - 3, topY + (boxHeight - barHeight)/2 + barHeight * (1 - healthPercent))
-        self.HealthBar.Color = Color3.fromRGB(
-            255 * (1 - healthPercent),
-            255 * healthPercent,
-            0
-        )
-        self.HealthBar.Visible = true
-    else
-        self.HealthBar.Visible = false
-        self.HealthBarOutline.Visible = false
-    end
+        Bottom1 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, -Size.Y, -Size.Z)).p),
+        Bottom2 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, -Size.Y, Size.Z)).p),
+        Bottom3 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(Size.X, -Size.Y, Size.Z)).p),
+        Bottom4 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(Size.X, -Size.Y, -Size.Z)).p)
+    }
 end
 
-function DrawingESP:GetColor()
-    if self.Player.Team and LocalPlayer.Team and self.Player.Team == LocalPlayer.Team then
-        return ESPConfig.TeamColor
-    else
-        return ESPConfig.EnemyColor
-    end
+function ESP:UpdateBoxLines(corners)
+    -- Top face
+    self.lines.line1.From = Vector2.new(corners.Top1.X, corners.Top1.Y)
+    self.lines.line1.To = Vector2.new(corners.Top2.X, corners.Top2.Y)
+    
+    self.lines.line2.From = Vector2.new(corners.Top2.X, corners.Top2.Y)
+    self.lines.line2.To = Vector2.new(corners.Top3.X, corners.Top3.Y)
+    
+    self.lines.line3.From = Vector2.new(corners.Top3.X, corners.Top3.Y)
+    self.lines.line3.To = Vector2.new(corners.Top4.X, corners.Top4.Y)
+    
+    self.lines.line4.From = Vector2.new(corners.Top4.X, corners.Top4.Y)
+    self.lines.line4.To = Vector2.new(corners.Top1.X, corners.Top1.Y)
+    
+    -- Bottom face
+    self.lines.line5.From = Vector2.new(corners.Bottom1.X, corners.Bottom1.Y)
+    self.lines.line5.To = Vector2.new(corners.Bottom2.X, corners.Bottom2.Y)
+    
+    self.lines.line6.From = Vector2.new(corners.Bottom2.X, corners.Bottom2.Y)
+    self.lines.line6.To = Vector2.new(corners.Bottom3.X, corners.Bottom3.Y)
+    
+    self.lines.line7.From = Vector2.new(corners.Bottom3.X, corners.Bottom3.Y)
+    self.lines.line7.To = Vector2.new(corners.Bottom4.X, corners.Bottom4.Y)
+    
+    self.lines.line8.From = Vector2.new(corners.Bottom4.X, corners.Bottom4.Y)
+    self.lines.line8.To = Vector2.new(corners.Bottom1.X, corners.Bottom1.Y)
+    
+    -- Vertical edges
+    self.lines.line9.From = Vector2.new(corners.Bottom1.X, corners.Bottom1.Y)
+    self.lines.line9.To = Vector2.new(corners.Top1.X, corners.Top1.Y)
+    
+    self.lines.line10.From = Vector2.new(corners.Bottom2.X, corners.Bottom2.Y)
+    self.lines.line10.To = Vector2.new(corners.Top2.X, corners.Top2.Y)
+    
+    self.lines.line11.From = Vector2.new(corners.Bottom3.X, corners.Bottom3.Y)
+    self.lines.line11.To = Vector2.new(corners.Top3.X, corners.Top3.Y)
+    
+    self.lines.line12.From = Vector2.new(corners.Bottom4.X, corners.Bottom4.Y)
+    self.lines.line12.To = Vector2.new(corners.Top4.X, corners.Top4.Y)
 end
 
-function DrawingESP:SetVisible(visible)
-    if self.Box then self.Box.Visible = visible and ESPConfig.ShowBoxes and self.Enabled end
-    if self.NameText then self.NameText.Visible = visible and ESPConfig.ShowNames and self.Enabled end
-    if self.DistanceText then self.DistanceText.Visible = visible and ESPConfig.ShowDistance and self.Enabled end
-    if self.HealthBar then self.HealthBar.Visible = visible and ESPConfig.ShowHealth and self.Enabled end
-    if self.HealthBarOutline then self.HealthBarOutline.Visible = visible and ESPConfig.ShowHealth and self.Enabled end
+function ESP:UpdateTracer(Size)
+    local trace = camera:WorldToViewportPoint((self.target.HumanoidRootPart.CFrame * CFrame.new(0, -Size.Y, 0)).p)
+    self.lines.Tracer.From = Vector2.new(camera.ViewportSize.X/2, camera.ViewportSize.Y)
+    self.lines.Tracer.To = Vector2.new(trace.X, trace.Y)
 end
 
-function DrawingESP:SetColor(color)
-    self.Color = color
-    if self.Box then self.Box.Color = color end
-    if self.NameText then self.NameText.Color = color end
+function ESP:UpdateHealthBar(pos, DistanceY)
+    local humanoid = self.target.Humanoid
+    local d = (Vector2.new(pos.X - DistanceY, pos.Y - DistanceY*2) - Vector2.new(pos.X - DistanceY, pos.Y + DistanceY*2)).magnitude 
+    local healthoffset = humanoid.Health/humanoid.MaxHealth * d
+    
+    self.lines.greenhealth.From = Vector2.new(pos.X - DistanceY - 4, pos.Y + DistanceY*2)
+    self.lines.greenhealth.To = Vector2.new(pos.X - DistanceY - 4, pos.Y + DistanceY*2 - healthoffset)
+    
+    self.lines.healthbar.From = Vector2.new(pos.X - DistanceY - 4, pos.Y + DistanceY*2)
+    self.lines.healthbar.To = Vector2.new(pos.X - DistanceY - 4, pos.Y - DistanceY*2)
+    
+    local health = Color3.fromRGB(255, 102, 0)
+    local losshealth = Color3.fromRGB(255, 0, 0)
+    self.lines.greenhealth.Color = losshealth:lerp(health, humanoid.Health/humanoid.MaxHealth)
 end
 
-function DrawingESP:Toggle()
-    self.Enabled = not self.Enabled
-    if not self.Enabled then
-        self:SetVisible(false)
+function ESP:UpdateTeamColors()
+    local color = (self.target.TeamColor == player.TeamColor) and self.settings.green or self.settings.red
+    local shifterColor = (self.target.TeamColor == player.TeamColor) and self.settings.red or self.settings.green
+    
+    for _, line in pairs(self.lines) do
+        line.Color = color
     end
+    self.shifter.Color = shifterColor
 end
 
-function DrawingESP:SetEnabled(enabled)
-    self.Enabled = enabled
-    if not self.Enabled then
-        self:SetVisible(false)
-    end
-end
-
--- Billboard ESP Class
-local BillboardESP = {}
-BillboardESP.__index = BillboardESP
-
-function BillboardESP.new(player)
-    local self = setmetatable({}, BillboardESP)
-    
-    self.Player = player
-    self.Enabled = true
-    
-    -- Create billboard GUI
-    self.BillboardGui = Instance.new("BillboardGui")
-    self.BillboardGui.Size = ESPConfig.BillboardSize
-    self.BillboardGui.StudsOffset = ESPConfig.StudsOffset
-    self.BillboardGui.AlwaysOnTop = true
-    
-    -- Main frame
-    self.Frame = Instance.new("Frame")
-    self.Frame.Size = UDim2.new(1, 0, 1, 0)
-    self.Frame.BackgroundTransparency = 1
-    self.Frame.Parent = self.BillboardGui
-    
-    -- Name label
-    self.NameLabel = Instance.new("TextLabel")
-    self.NameLabel.Size = UDim2.new(1, 0, 0.3, 0)
-    self.NameLabel.Position = UDim2.new(0, 0, 0, 0)
-    self.NameLabel.BackgroundTransparency = 1
-    self.NameLabel.Text = player.Name
-    self.NameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    self.NameLabel.TextScaled = true
-    self.NameLabel.TextStrokeTransparency = 0
-    self.NameLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    self.NameLabel.Font = Enum.Font.GothamBold
-    self.NameLabel.Parent = self.Frame
-    
-    -- Distance label
-    self.DistanceLabel = Instance.new("TextLabel")
-    self.DistanceLabel.Size = UDim2.new(1, 0, 0.25, 0)
-    self.DistanceLabel.Position = UDim2.new(0, 0, 0.3, 0)
-    self.DistanceLabel.BackgroundTransparency = 1
-    self.DistanceLabel.Text = "0m"
-    self.DistanceLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    self.DistanceLabel.TextScaled = true
-    self.DistanceLabel.TextStrokeTransparency = 0
-    self.DistanceLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    self.DistanceLabel.Font = Enum.Font.Gotham
-    self.DistanceLabel.Parent = self.Frame
-    
-    -- Health bar frame
-    self.HealthFrame = Instance.new("Frame")
-    self.HealthFrame.Size = UDim2.new(0.8, 0, 0.15, 0)
-    self.HealthFrame.Position = UDim2.new(0.1, 0, 0.6, 0)
-    self.HealthFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-    self.HealthFrame.BorderSizePixel = 1
-    self.HealthFrame.BorderColor3 = Color3.fromRGB(0, 0, 0)
-    self.HealthFrame.Parent = self.Frame
-    
-    -- Health bar
-    self.HealthBar = Instance.new("Frame")
-    self.HealthBar.Size = UDim2.new(1, 0, 1, 0)
-    self.HealthBar.Position = UDim2.new(0, 0, 0, 0)
-    self.HealthBar.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
-    self.HealthBar.BorderSizePixel = 0
-    self.HealthBar.Parent = self.HealthFrame
-    
-    -- Health text
-    self.HealthText = Instance.new("TextLabel")
-    self.HealthText.Size = UDim2.new(1, 0, 0.2, 0)
-    self.HealthText.Position = UDim2.new(0, 0, 0.8, 0)
-    self.HealthText.BackgroundTransparency = 1
-    self.HealthText.Text = "100/100"
-    self.HealthText.TextColor3 = Color3.fromRGB(255, 255, 255)
-    self.HealthText.TextScaled = true
-    self.HealthText.TextStrokeTransparency = 0
-    self.HealthText.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    self.HealthText.Font = Enum.Font.Gotham
-    self.HealthText.Parent = self.Frame
-    
-    return self
-end
-
-function BillboardESP:Update()
-    if not self.Player or not self.Player.Parent or not self.Enabled then
-        if not self.Enabled then
-            self.BillboardGui.Enabled = false
-        else
-            self:Remove()
-        end
-        return
-    end
-    
-    local character = self.Player.Character
-    if not character or not character:FindFirstChild("HumanoidRootPart") then
-        self.BillboardGui.Enabled = false
-        return
-    end
-    
-    local humanoid = character:FindFirstChild("Humanoid")
-    if not humanoid then
-        self.BillboardGui.Enabled = false
-        return
-    end
-    
-    local rootPart = character.HumanoidRootPart
-    
-    -- Check distance
-    local distance = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and 
-                     (LocalPlayer.Character.HumanoidRootPart.Position - rootPart.Position).Magnitude) or math.huge
-    
-    if distance > ESPConfig.MaxDistance then
-        self.BillboardGui.Enabled = false
-        return
-    end
-    
-    -- Check team
-    if not ESPConfig.ShowTeammates and self.Player.Team == LocalPlayer.Team and self.Player ~= LocalPlayer then
-        self.BillboardGui.Enabled = false
-        return
-    end
-    
-    -- Attach to character
-    if self.BillboardGui.Parent ~= rootPart then
-        self.BillboardGui.Parent = rootPart
-    end
-    
-    self.BillboardGui.Enabled = true
-    
-    -- Update colors based on team
-    local color = self:GetColor()
-    self.NameLabel.TextColor3 = color
-    
-    -- Update distance
-    if ESPConfig.ShowDistance then
-        self.DistanceLabel.Text = string.format("%.0fm", distance)
-        self.DistanceLabel.Visible = true
-    else
-        self.DistanceLabel.Visible = false
-    end
-    
-    -- Update health
-    if ESPConfig.ShowHealth then
-        local healthPercent = humanoid.Health / humanoid.MaxHealth
-        self.HealthBar.Size = UDim2.new(healthPercent, 0, 1, 0)
-        self.HealthBar.BackgroundColor3 = Color3.fromRGB(
-            255 * (1 - healthPercent),
-            255 * healthPercent,
-            0
-        )
-        self.HealthText.Text = string.format("%.0f/%.0f", humanoid.Health, humanoid.MaxHealth)
-        self.HealthFrame.Visible = true
-        self.HealthText.Visible = true
-    else
-        self.HealthFrame.Visible = false
-        self.HealthText.Visible = false
-    end
-    
-    -- Update name visibility
-    self.NameLabel.Visible = ESPConfig.ShowNames
-end
-
-function BillboardESP:GetColor()
-    if self.Player.Team and LocalPlayer.Team and self.Player.Team == LocalPlayer.Team then
-        return ESPConfig.TeamColor
-    else
-        return ESPConfig.EnemyColor
-    end
-end
-
-function DrawingESP:Remove()
-    self.Box:Remove()
-    self.NameText:Remove()
-    self.DistanceText:Remove()
-    self.HealthBar:Remove()
-    self.HealthBarOutline:Remove()
-end
-
-function BillboardESP:SetColor(color)
-    self.Color = color
-    if self.NameLabel then self.NameLabel.TextColor3 = color end
-end
-
-function BillboardESP:Toggle()
-    self.Enabled = not self.Enabled
-    if not self.Enabled then
-        self:SetVisible(false)
-    end
-end
-
-function BillboardESP:SetEnabled(enabled)
-    self.Enabled = enabled
-    if not self.Enabled then
-        self:SetVisible(false)
-    end
-end
-
-function BillboardESP:SetVisible(visible)
-    if self.BillboardGui then
-        self.BillboardGui.Enabled = visible and self.Enabled
-    end
-end
-
--- Main ESP Functions
-function CreateESP.AddPlayer(player)
-    if player == LocalPlayer then return end
-    if ESPObjects[player] then return end
-    
-    local espObject
-    if ESPConfig.Mode == "Drawing" then
-        espObject = DrawingESP.new(player)
-    elseif ESPConfig.Mode == "Billboard" then
-        espObject = BillboardESP.new(player)
-    end
-    
-    ESPObjects[player] = espObject
-end
-
-function CreateESP.RemovePlayer(player)
-    local espObject = ESPObjects[player]
-    if espObject then
-        espObject:Remove()
-        ESPObjects[player] = nil
-    end
-end
-
--- Custom Object ESP Functions
-function CreateESP.AddObject(object, name, color)
-    if typeof(object) == "table" then
-        -- Handle table of objects
-        local espObjects = {}
-        for i, obj in pairs(object) do
-            if typeof(obj) == "Instance" then
-                local objName = name and (name .. "_" .. i) or nil
-                local espObj = CreateESP.AddObject(obj, objName, color)
-                if espObj then
-                    table.insert(espObjects, espObj)
-                end
+function ESP:UpdateShifter(Size)
+    if self.debounce == 0 then
+        self.debounce = 1
+        spawn(function()
+            -- Animation sequence
+            for i = 0, Size.Y, 0.1 do
+                self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
+                wait()
             end
-        end
-        return espObjects
+            for i = self.shifteroffset, 0, -0.1 do
+                self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
+                wait()
+            end
+            for i = 0, -Size.Y, -0.1 do
+                self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
+                wait()
+            end
+            for i = self.shifteroffset, 0, 0.1 do
+                self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
+                wait()
+            end
+            self.debounce = 0
+        end)
     end
     
-    if typeof(object) ~= "Instance" then
-        warn("CreateESP.AddObject: Expected Instance or table of Instances")
+    -- Update shifter quad position
+    local rootPart = self.target.HumanoidRootPart
+    local shifter1 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, self.shifteroffset, -Size.Z)).p)
+    local shifter2 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, self.shifteroffset, Size.Z)).p)
+    local shifter3 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(Size.X, self.shifteroffset, Size.Z)).p)
+    local shifter4 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(Size.X, self.shifteroffset, -Size.Z)).p)
+    
+    self.shifter.PointA = Vector2.new(shifter1.X, shifter1.Y)
+    self.shifter.PointB = Vector2.new(shifter2.X, shifter2.Y)
+    self.shifter.PointC = Vector2.new(shifter3.X, shifter3.Y)
+    self.shifter.PointD = Vector2.new(shifter4.X, shifter4.Y)
+end
+
+function ESP:UpdateAutoThickness()
+    if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then return end
+    
+    local distance = (player.Character.HumanoidRootPart.Position - self.target.HumanoidRootPart.Position).magnitude
+    local value = math.clamp(1/distance*100, 0.1, 4)
+    
+    for _, line in pairs(self.lines) do
+        line.Thickness = value
+    end
+    self.shifter.Thickness = value
+end
+
+function ESP:Show()
+    if not self.visible then return end
+    
+    for name, line in pairs(self.lines) do
+        if name ~= "Tracer" or self.settings.Tracers then
+            line.Visible = true
+        end
+    end
+    self.shifter.Visible = true
+end
+
+function ESP:Hide()
+    for _, line in pairs(self.lines) do
+        line.Visible = false
+    end
+    self.shifter.Visible = false
+end
+
+function ESP:SetVisible(visible)
+    self.visible = visible
+    if visible then
+        self:Show()
+    else
+        self:Hide()
+    end
+end
+
+function ESP:SetColor(color)
+    self.color = color
+    if not self.settings.Team_Check then
+        for _, line in pairs(self.lines) do
+            line.Color = color
+        end
+    end
+end
+
+function ESP:Clear()
+    if self.connection then
+        self.connection:Disconnect()
+        self.connection = nil
+    end
+    
+    for _, line in pairs(self.lines) do
+        line:Remove()
+    end
+    self.shifter:Remove()
+    
+    -- Unregister from config manager
+    ESPConfig.instances[self] = nil
+    
+    self.lines = {}
+    self.shifter = nil
+end
+
+function ESP:Start()
+    if self.connection then return end
+    
+    self.connection = runService.RenderStepped:Connect(function()
+        self:UpdateESP()
+    end)
+end
+
+function ESP:Stop()
+    if self.connection then
+        self.connection:Disconnect()
+        self.connection = nil
+    end
+    self:Hide()
+end
+
+-- Global Config Management Functions
+function ESPConfig:UpdateAll(newConfig)
+    -- Update global settings
+    for key, value in pairs(newConfig) do
+        self.globalSettings[key] = value
+    end
+    
+    -- Update all ESP instances
+    for espInstance, _ in pairs(self.instances) do
+        espInstance:UpdateSettings(newConfig)
+    end
+    
+    print("Updated " .. self:CountInstances() .. " ESP instances with new configuration")
+end
+
+function ESPConfig:CountInstances()
+    local count = 0
+    for _, _ in pairs(self.instances) do
+        count = count + 1
+    end
+    return count
+end
+
+function ESPConfig:GetGlobalSettings()
+    return self.globalSettings
+end
+
+function ESPConfig:SetGlobalTracers(enabled)
+    self:UpdateAll({Tracers = enabled})
+end
+
+function ESPConfig:SetGlobalThickness(thickness)
+    self:UpdateAll({
+        Box_Thickness = thickness,
+        Tracer_Thickness = thickness
+    })
+end
+
+function ESPConfig:SetGlobalColors(boxColor, tracerColor, shifterColor)
+    self:UpdateAll({
+        Box_Color = boxColor or self.globalSettings.Box_Color,
+        Tracer_Color = tracerColor or self.globalSettings.Tracer_Color,
+        Shifter_Color = shifterColor or self.globalSettings.Shifter_Color
+    })
+end
+
+function ESPConfig:SetGlobalTeamCheck(enabled)
+    self:UpdateAll({Team_Check = enabled})
+end
+
+function ESPConfig:SetGlobalAutoThickness(enabled)
+    self:UpdateAll({Autothickness = enabled})
+end
+
+-- Main ESP Module Functions
+function ESPModule.AddESP(targetPath, color, settings)
+    local targetPlayer
+    
+    -- Handle different path types
+    if typeof(targetPath) == "Instance" then
+        targetPlayer = targetPath
+    elseif typeof(targetPath) == "string" then
+        targetPlayer = players:FindFirstChild(targetPath)
+        if not targetPlayer then
+            warn("Player not found: " .. targetPath)
+            return nil
+        end
+    else
+        warn("Invalid target path. Expected Player instance or player name string.")
         return nil
     end
     
-    if CustomESPObjects[object] then 
-        warn("CreateESP.AddObject: Object already has ESP")
-        return CustomESPObjects[object]
+    -- Merge with global settings
+    local finalSettings = {}
+    for key, value in pairs(ESPConfig.globalSettings) do
+        finalSettings[key] = value
     end
-    
-    local espObject = ObjectESP.new(object, name, color)
-    if espObject then
-        CustomESPObjects[object] = espObject
-        print("Added ESP for object:", object.Name)
-        return espObject
-    end
-    
-    return nil
-end
-
-function CreateESP.RemoveObject(object)
-    if typeof(object) == "table" then
-        -- Handle table of objects
-        for _, obj in pairs(object) do
-            if typeof(obj) == "Instance" then
-                CreateESP.RemoveObject(obj)
-            end
-        end
-        return
-    end
-    
-    local espObject = CustomESPObjects[object]
-    if espObject then
-        espObject:Remove()
-        CustomESPObjects[object] = nil
-        print("Removed ESP for object:", object.Name)
-    end
-end
-
-function CreateESP.AddObjectsByName(name, parent, color)
-    parent = parent or Workspace
-    local objects = {}
-    local espObjects = {}
-    
-    local function findObjects(container)
-        for _, child in pairs(container:GetChildren()) do
-            if child.Name == name then
-                table.insert(objects, child)
-            end
-            findObjects(child)
+    if settings then
+        for key, value in pairs(settings) do
+            finalSettings[key] = value
         end
     end
     
-    findObjects(parent)
+    -- Create ESP instance
+    local esp = ESP.new(targetPlayer, color, finalSettings)
+    esp:Start()
     
-    if #objects > 0 then
-        for i, obj in pairs(objects) do
-            local espObj = CreateESP.AddObject(obj, name .. "_" .. i, color)
-            if espObj then
-                table.insert(espObjects, espObj)
-            end
-        end
-        print("Added ESP for", #objects, "objects named:", name)
-    else
-        warn("No objects found with name:", name)
-    end
-    
-    return espObjects
-end
-
-function CreateESP.AddObjectsByClass(className, parent, color)
-    parent = parent or Workspace
-    local objects = {}
-    local espObjects = {}
-    
-    local function findObjects(container)
-        for _, child in pairs(container:GetChildren()) do
-            if child:IsA(className) then
-                table.insert(objects, child)
-            end
-            findObjects(child)
-        end
-    end
-    
-    findObjects(parent)
-    
-    if #objects > 0 then
-        for i, obj in pairs(objects) do
-            local espObj = CreateESP.AddObject(obj, className .. "_" .. i, color)
-            if espObj then
-                table.insert(espObjects, espObj)
-            end
-        end
-        print("Added ESP for", #objects, "objects of class:", className)
-    else
-        warn("No objects found with class:", className)
-    end
-    
-    return espObjects
-end
-
-function CreateESP.ClearCustomObjects()
-    for object, espObject in pairs(CustomESPObjects) do
-        espObject:Remove()
-    end
-    CustomESPObjects = {}
-    print("Cleared all custom ESP objects")
-end
-
-function CreateESP.UpdateAll()
-    if not ESPConfig.Enabled then return end
-    
-    -- Update player ESP
-    for player, espObject in pairs(ESPObjects) do
-        if player and player.Parent then
-            espObject:Update()
-        else
-            CreateESP.RemovePlayer(player)
-        end
-    end
-    
-    -- Update custom object ESP
-    for object, espObject in pairs(CustomESPObjects) do
-        if object and object.Parent then
-            espObject:Update()
-        else
-            CreateESP.RemoveObject(object)
-        end
-    end
-end
-
-function CreateESP.Toggle()
-    ESPConfig.Enabled = not ESPConfig.Enabled
-    
-    if not ESPConfig.Enabled then
-        -- Hide player ESP
-        for _, espObject in pairs(ESPObjects) do
-            if ESPConfig.Mode == "Drawing" then
-                espObject:SetVisible(false)
-            elseif ESPConfig.Mode == "Billboard" then
-                espObject.BillboardGui.Enabled = false
-            end
-        end
+    -- Return control functions
+    return {
+        Clear = function()
+            esp:Clear()
+        end,
         
-        -- Hide custom object ESP
-        for _, espObject in pairs(CustomESPObjects) do
-            espObject:SetVisible(false)
+        Visible = function(visible)
+            esp:SetVisible(visible)
+        end,
+        
+        SetColor = function(newColor)
+            esp:SetColor(newColor)
+        end,
+        
+        Stop = function()
+            esp:Stop()
+        end,
+        
+        Start = function()
+            esp:Start()
+        end,
+        
+        UpdateSettings = function(newSettings)
+            esp:UpdateSettings(newSettings)
+        end
+    }
+end
+
+-- Batch ESP management
+function ESPModule.AddESPToAll(path, color, settings, excludeSelf)
+    local espInstances = {}
+    local LIST = path:GetChildren() or players:GetPlayers()
+    print("Adding ESP to " .. #LIST .. " players")
+    for _, plr in pairs(LIST) do
+        if excludeSelf == false or plr ~= player.Character then
+            local esp = ESPModule.AddESP(plr, color, settings)
+            if esp then
+                espInstances[plr.Name] = esp
+            end
         end
     end
-end
-
-function CreateESP.SetMode(mode)
-    if mode ~= "Drawing" and mode ~= "Billboard" then return end
     
-    -- Remove all current ESP objects
-    for player, _ in pairs(ESPObjects) do
-        CreateESP.RemovePlayer(player)
-    end
-    
-    for object, _ in pairs(CustomESPObjects) do
-        CreateESP.RemoveObject(object)
-    end
-    
-    -- Store custom objects to re-add them
-    local customObjectsToReAdd = {}
-    for object, espObject in pairs(CustomESPObjects) do
-        customObjectsToReAdd[object] = {
-            name = espObject.Name,
-            color = espObject.Color
-        }
-    end
-    
-    -- Set new mode
-    ESPConfig.Mode = mode
-    
-    -- Re-add all players
-    for _, player in pairs(Players:GetPlayers()) do
-        CreateESP.AddPlayer(player)
-    end
-    
-    -- Re-add custom objects
-    for object, data in pairs(customObjectsToReAdd) do
-        if object and object.Parent then
-            CreateESP.AddObject(object, data.name, data.color)
+    -- Handle new players
+    local newPlayerConnection = path.ChildAdded:Connect(function(newPlayer)
+        if excludeSelf == false or newPlayer ~= player then
+            espInstances[newPlayer.Name] = ESPModule.AddESP(newPlayer, color, settings)
         end
-    end
-end
-
-function CreateESP.GetConfig()
-    return ESPConfig
-end
-
-function CreateESP.SetConfig(config)
-    for key, value in pairs(config) do
-        if ESPConfig[key] ~= nil then
-            ESPConfig[key] = value
+    end)
+    
+    -- Handle leaving players
+    local playerRemovedConnection = path.ChildRemoved:Connect(function(leavingPlayer)
+        if espInstances[leavingPlayer.Name] then
+            espInstances[leavingPlayer.Name].Clear()
+            espInstances[leavingPlayer.Name] = nil
         end
-    end
+    end)
+    
+    return {
+        ClearAll = function()
+            for _, esp in pairs(espInstances) do
+                esp.Clear()
+            end
+            espInstances = {}
+            newPlayerConnection:Disconnect()
+            playerRemovedConnection:Disconnect()
+        end,
+        
+        SetVisible = function(visible)
+            for _, esp in pairs(espInstances) do
+                esp.Visible(visible)
+            end
+        end,
+        
+        SetColor = function(newColor)
+            for _, esp in pairs(espInstances) do
+                esp.SetColor(newColor)
+            end
+        end,
+
+        Start = function()
+            for _, esp in pairs(espInstances) do
+                esp.Start()
+            end
+        end,
+        
+        GetESP = function(playerName)
+            return espInstances[playerName]
+        end,
+        
+        UpdateAllSettings = function(newSettings)
+            for _, esp in pairs(espInstances) do
+                esp.UpdateSettings(newSettings)
+            end
+        end
+    }
 end
 
--- Initialize ESP
-function CreateESP.Init()
-    -- Add existing players
-    for _, player in pairs(Players:GetPlayers()) do
-        CreateESP.AddPlayer(player)
-    end
-    
-    -- Connect player events
-    Players.PlayerAdded:Connect(CreateESP.AddPlayer)
-    Players.PlayerRemoving:Connect(CreateESP.RemovePlayer)
-    
-    -- Update loop
-    RunService.Heartbeat:Connect(CreateESP.UpdateAll)
-    
-    print("CreateESP Module Loaded!")
-    print("Current Mode:", ESPConfig.Mode)
-    print("Use CreateESP.Toggle() to toggle ESP")
-    print("Use CreateESP.SetMode('Drawing') or CreateESP.SetMode('Billboard') to change modes")
-    print("Use CreateESP.AddObject(object, name, color) to add custom objects")
-    print("Use CreateESP.AddObjectsByName(name, parent, color) to add objects by name")
-    print("Use CreateESP.AddObjectsByClass(className, parent, color) to add objects by class")
-end
-
--- Auto-initialize
-CreateESP.Init()
-
-return CreateESP
+return ESPModule
