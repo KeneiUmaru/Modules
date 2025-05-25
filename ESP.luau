@@ -35,6 +35,8 @@ local ESPConfig = {
     globalSettings = DEFAULT_SETTINGS
 }
 
+ESPModule.Config = ESPConfig
+
 -- Utility Functions
 local function Lerp(a, b, t)
     return a + (b - a) * t
