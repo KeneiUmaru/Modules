@@ -1,14 +1,11 @@
--- ESP Module System with Config Management
 local ESPModule = {}
 
--- Services
 local workspace = game:GetService("Workspace")
 local players = game:GetService("Players")
 local runService = game:GetService("RunService")
 local player = players.LocalPlayer
 local camera = workspace.CurrentCamera
 
--- Default Settings
 local DEFAULT_SETTINGS = {
     Box_Enabled = true,
     Box_Color = Color3.fromRGB(255, 0, 0),
@@ -21,9 +18,17 @@ local DEFAULT_SETTINGS = {
     Tracer_Transparency = 1,
     
     HealthBar_Enabled = true,
+    Text_Enabled = true,
+    Text_Color = Color3.fromRGB(255, 255, 255),
+    Text_Size = 16,
+    Text_Font = 2,
 
     Shifter_Enabled = true,
     Shifter_Color = Color3.fromRGB(0, 255, 0),
+    
+    Charms_Enabled = false,
+    Charms_Color = Color3.fromRGB(255, 255, 0),
+    Charms_Thickness = 3,
     
     Autothickness = true,
     Team_Check = false,
@@ -33,15 +38,14 @@ local DEFAULT_SETTINGS = {
     black = Color3.fromRGB(0, 0, 0)
 }
 
--- Global ESP Configuration Manager
 local ESPConfig = {
     instances = {},
-    globalSettings = DEFAULT_SETTINGS
+    globalSettings = DEFAULT_SETTINGS,
+    renderConnection = nil
 }
 
 ESPModule.Config = ESPConfig
 
--- Utility Functions
 local function Lerp(a, b, t)
     return a + (b - a) * t
 end
@@ -57,20 +61,33 @@ local function NewLine(thickness, color)
     return line
 end
 
--- ESP Class
+local function NewText(text, size, color)
+    local textObj = Drawing.new("Text")
+    textObj.Visible = false
+    textObj.Text = text or ""
+    textObj.Size = size or DEFAULT_SETTINGS.Text_Size
+    textObj.Color = color or DEFAULT_SETTINGS.Text_Color
+    textObj.Font = DEFAULT_SETTINGS.Text_Font
+    textObj.Center = true
+    textObj.Outline = true
+    textObj.OutlineColor = Color3.fromRGB(0, 0, 0)
+    return textObj
+end
+
 local ESP = {}
 ESP.__index = ESP
 
-function ESP.new(targetPlayer, color, settings)
+function ESP.new(targetObject, color, settings)
     local self = setmetatable({}, ESP)
     
-    self.target = targetPlayer
+    self.target = targetObject
     self.color = color or DEFAULT_SETTINGS.Box_Color
     self.settings = settings or DEFAULT_SETTINGS
     self.visible = true
-    self.connection = nil
+    self.lastParent = nil
+    self.parentChangeConnection = nil
+    self.isObject = not targetObject:FindFirstChild("Humanoid")
     
-    -- Create drawing objects
     self.lines = {}
     for i = 1, 12 do
         self.lines["line" .. i] = NewLine(self.settings.Box_Thickness, self.color)
@@ -80,7 +97,8 @@ function ESP.new(targetPlayer, color, settings)
     self.lines.healthbar = NewLine(3, self.settings.black)
     self.lines.greenhealth = NewLine(1.5, self.settings.black)
     
-    -- Shifter quad
+    self.textLabel = NewText(self.target.Name, self.settings.Text_Size, self.settings.Text_Color)
+    
     self.shifter = Drawing.new("Quad")
     self.shifter.Visible = false
     self.shifter.Color = self.settings.Shifter_Color
@@ -88,94 +106,229 @@ function ESP.new(targetPlayer, color, settings)
     self.shifter.Filled = false
     self.shifter.Transparency = self.settings.Box_Transparency
     
-    -- Animation variables
+    self.charms = Drawing.new("Circle")
+    self.charms.Visible = false
+    self.charms.Color = self.settings.Charms_Color
+    self.charms.Thickness = self.settings.Charms_Thickness
+    self.charms.Filled = false
+    self.charms.Transparency = self.settings.Box_Transparency
+    self.charms.Radius = 20
+    
     self.debounce = 0
     self.shifteroffset = 0
+    self.charmsRadius = 20
+    self.charmsGrow = true
     
-    -- Register with config manager
+    self:SetupParentDetection()
+    
     ESPConfig.instances[self] = true
     
     return self
 end
 
+function ESP:SetupParentDetection()
+    self.lastParent = self.target.Parent
+    
+    self.parentChangeConnection = self.target.AncestryChanged:Connect(function()
+        local newParent = self.target.Parent
+        if newParent ~= self.lastParent then
+            if not newParent then
+                self:Clear()
+                return
+            end
+            self.lastParent = newParent
+        end
+    end)
+end
+
 function ESP:UpdateSettings(newSettings)
-    -- Merge new settings with existing ones
     for key, value in pairs(newSettings) do
         self.settings[key] = value
     end
     
-    -- Update drawing objects with new settings
     for i = 1, 12 do
-        self.lines["line" .. i].Visible = self.settings.Box_Enabled
         self.lines["line" .. i].Thickness = self.settings.Box_Thickness
         self.lines["line" .. i].Color = self.settings.Box_Color
+        self.lines["line" .. i].Transparency = self.settings.Box_Transparency
     end
 
-    self.lines.tracer.Visible = self.settings.Tracers
     self.lines.Tracer.Thickness = self.settings.Tracer_Thickness
     self.lines.Tracer.Color = self.settings.Tracer_Color
     self.lines.Tracer.Transparency = self.settings.Tracer_Transparency
     
-    self.lines.healthbar.Visible = self.settings.HealthBar_Enabled
-    self.lines.greenhealth.Visible = self.settings.HealthBar_Enabled
+    self.textLabel.Size = self.settings.Text_Size
+    self.textLabel.Color = self.settings.Text_Color
 
     self.shifter.Color = self.settings.Shifter_Color
     self.shifter.Thickness = self.settings.Box_Thickness
     self.shifter.Transparency = self.settings.Box_Transparency
+    
+    self.charms.Color = self.settings.Charms_Color
+    self.charms.Thickness = self.settings.Charms_Thickness
+    self.charms.Transparency = self.settings.Box_Transparency
+end
+
+function ESP:IsValidTarget()
+    if not self.target or not self.target.Parent then return false end
+
+    if self.isObject then
+        return self.target:IsA("BasePart") or self.target:IsA("Model")
+    else
+        return self.target:FindFirstChild("Humanoid") and
+               self.target:FindFirstChild("HumanoidRootPart") and
+               self.target:FindFirstChild("Head") and
+               self.target.Name ~= player.Name and
+               self.target.Humanoid.Health > 0
+    end
+end
+
+
+function ESP:GetTargetPosition()
+    if not self:IsValidTarget() then return Vector3.zero end
+
+    if self.isObject then
+        if self.target:IsA("BasePart") then
+            return self.target.Position
+        elseif self.target:IsA("Model") then
+            if self.target.PrimaryPart then
+                return self.target.PrimaryPart.Position
+            else
+                local cf = self.target:GetBoundingBox()
+                return cf.Position
+            end
+        end
+    else
+        return self.target:FindFirstChild("HumanoidRootPart").Position
+    end
+
+    return Vector3.zero
+end
+
+function ESP:GetTargetSize()
+    if not self:IsValidTarget() then return Vector3.zero end
+
+    if self.isObject then
+        if self.target:IsA("BasePart") then
+            return self.target.Size
+        elseif self.target:IsA("Model") then
+            local _, size = self.target:GetBoundingBox()
+            return size
+        end
+    else
+        local scale = self.target.Head.Size.Y / 2
+        return Vector3.new(2, 3, 1.5) * (scale * 2)
+    end
+
+    return Vector3.new(2, 2, 2)
 end
 
 function ESP:UpdateESP()
-    if not self.target or 
-       not self.target:FindFirstChild("Humanoid") or
-       not self.target:FindFirstChild("HumanoidRootPart") or
-       not self.target:FindFirstChild("Head") or
-       self.target.Name == player.Name or
-       self.target.Humanoid.Health <= 0 then
+    if not self:IsValidTarget() then
         self:Hide()
         return
     end
     
-    local pos, vis = camera:WorldToViewportPoint(self.target.HumanoidRootPart.Position)
-    local head = camera:WorldToViewportPoint(self.target.Head.Position)
-    local DistanceY = math.clamp((Vector2.new(head.X, head.Y) - Vector2.new(pos.X, pos.Y)).magnitude, 2, math.huge)
+    local targetPos = self:GetTargetPosition()
+    local pos, vis = camera:WorldToViewportPoint(targetPos)
     
     if not vis then
         self:Hide()
         return
     end
     
-    local Scale = self.target.Head.Size.Y/2
-    local Size = Vector3.new(2, 3, 1.5) * (Scale * 2)
+    local Size = self:GetTargetSize()
     
-    -- Calculate 3D box corners
-    local corners = self:Calculate3DBox(Size)
-    
-    -- Update box lines
-    self:UpdateBoxLines(corners)
-    
-    -- Update tracer
-    if self.settings.Tracers then
-        self:UpdateTracer(Size)
+    if self.isObject then
+        self:UpdateObjectESP(pos, Size)
+    else
+        local head = camera:WorldToViewportPoint(self.target.Head.Position)
+        local DistanceY = math.clamp((Vector2.new(head.X, head.Y) - Vector2.new(pos.X, pos.Y)).magnitude, 2, math.huge)
+        
+        local corners = self:Calculate3DBox(Size)
+        
+        if self.settings.Box_Enabled then
+            self:UpdateBoxLines(corners)
+        end
+        
+        if self.settings.Tracers then
+            self:UpdateTracer(Size)
+        end
+        
+        if self.settings.HealthBar_Enabled then
+            self:UpdateHealthBar(pos, DistanceY)
+        end
+        
+        if self.settings.Text_Enabled then
+            self:UpdateTextLabel(head)
+        end
+        
+        if self.settings.Team_Check then
+            self:UpdateTeamColors()
+        end
+        
+        if self.settings.Shifter_Enabled then
+            self:UpdateShifter(Size)
+        end
     end
     
-    -- Update health bar
-    self:UpdateHealthBar(pos, DistanceY)
-    
-    -- Update team colors
-    if self.settings.Team_Check then
-        self:UpdateTeamColors()
+    if self.settings.Charms_Enabled then
+        self:UpdateCharms(pos)
     end
     
-    -- Update shifter animation
-    self:UpdateShifter(Size)
-    
-    -- Update thickness based on distance
     if self.settings.Autothickness then
         self:UpdateAutoThickness()
     end
     
-    -- Show all elements
     self:Show()
+end
+
+function ESP:UpdateObjectESP(pos, Size)
+    local corners = self:Calculate3DBoxForObject(Size)
+    
+    if self.settings.Box_Enabled then
+        self:UpdateBoxLines(corners)
+    end
+    
+    if self.settings.Tracers then
+        self:UpdateObjectTracer()
+    end
+    
+    if self.settings.Text_Enabled then
+        self:UpdateObjectTextLabel(pos)
+    end
+end
+
+function ESP:Calculate3DBoxForObject(Size)
+    local targetPos = self:GetTargetPosition()
+    local rootCFrame = CFrame.new(targetPos)
+    
+    return {
+        Top1 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(-Size.X/2, Size.Y/2, -Size.Z/2)).p),
+        Top2 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(-Size.X/2, Size.Y/2, Size.Z/2)).p),
+        Top3 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(Size.X/2, Size.Y/2, Size.Z/2)).p),
+        Top4 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(Size.X/2, Size.Y/2, -Size.Z/2)).p),
+        
+        Bottom1 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(-Size.X/2, -Size.Y/2, -Size.Z/2)).p),
+        Bottom2 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(-Size.X/2, -Size.Y/2, Size.Z/2)).p),
+        Bottom3 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(Size.X/2, -Size.Y/2, Size.Z/2)).p),
+        Bottom4 = camera:WorldToViewportPoint((rootCFrame * CFrame.new(Size.X/2, -Size.Y/2, -Size.Z/2)).p)
+    }
+end
+
+function ESP:UpdateObjectTracer()
+    local targetPos = self:GetTargetPosition()
+    local trace = camera:WorldToViewportPoint(targetPos)
+    self.lines.Tracer.From = Vector2.new(camera.ViewportSize.X/2, camera.ViewportSize.Y)
+    self.lines.Tracer.To = Vector2.new(trace.X, trace.Y)
+end
+
+function ESP:UpdateObjectTextLabel(pos)
+    self.textLabel.Position = Vector2.new(pos.X, pos.Y - 30)
+    
+    local distance = player.Character and player.Character:FindFirstChild("HumanoidRootPart") and 
+        math.floor((player.Character.HumanoidRootPart.Position - self:GetTargetPosition()).magnitude) or 0
+    
+    self.textLabel.Text = string.format("%s [%dm]", self.target.Name, distance)
 end
 
 function ESP:Calculate3DBox(Size)
@@ -195,7 +348,6 @@ function ESP:Calculate3DBox(Size)
 end
 
 function ESP:UpdateBoxLines(corners)
-    -- Top face
     self.lines.line1.From = Vector2.new(corners.Top1.X, corners.Top1.Y)
     self.lines.line1.To = Vector2.new(corners.Top2.X, corners.Top2.Y)
     
@@ -208,7 +360,6 @@ function ESP:UpdateBoxLines(corners)
     self.lines.line4.From = Vector2.new(corners.Top4.X, corners.Top4.Y)
     self.lines.line4.To = Vector2.new(corners.Top1.X, corners.Top1.Y)
     
-    -- Bottom face
     self.lines.line5.From = Vector2.new(corners.Bottom1.X, corners.Bottom1.Y)
     self.lines.line5.To = Vector2.new(corners.Bottom2.X, corners.Bottom2.Y)
     
@@ -221,7 +372,6 @@ function ESP:UpdateBoxLines(corners)
     self.lines.line8.From = Vector2.new(corners.Bottom4.X, corners.Bottom4.Y)
     self.lines.line8.To = Vector2.new(corners.Bottom1.X, corners.Bottom1.Y)
     
-    -- Vertical edges
     self.lines.line9.From = Vector2.new(corners.Bottom1.X, corners.Bottom1.Y)
     self.lines.line9.To = Vector2.new(corners.Top1.X, corners.Top1.Y)
     
@@ -246,48 +396,61 @@ function ESP:UpdateHealthBar(pos, DistanceY)
     local d = (Vector2.new(pos.X - DistanceY, pos.Y - DistanceY*2) - Vector2.new(pos.X - DistanceY, pos.Y + DistanceY*2)).magnitude 
     local healthoffset = humanoid.Health/humanoid.MaxHealth * d
 
-    self.lines.healthbar.Visible = self.settings.HealthBar_Enabled
-    self.lines.greenhealth.Visible = self.settings.HealthBar_Enabled
-    
     self.lines.greenhealth.From = Vector2.new(pos.X - DistanceY - 4, pos.Y + DistanceY*2)
     self.lines.greenhealth.To = Vector2.new(pos.X - DistanceY - 4, pos.Y + DistanceY*2 - healthoffset)
     
     self.lines.healthbar.From = Vector2.new(pos.X - DistanceY - 4, pos.Y + DistanceY*2)
     self.lines.healthbar.To = Vector2.new(pos.X - DistanceY - 4, pos.Y - DistanceY*2)
     
-    local health = Color3.fromRGB(255, 102, 0)
+    local health = Color3.fromRGB(94, 255, 0)
     local losshealth = Color3.fromRGB(255, 0, 0)
     self.lines.greenhealth.Color = losshealth:lerp(health, humanoid.Health/humanoid.MaxHealth)
 end
 
+function ESP:UpdateTextLabel(head)
+    self.textLabel.Position = Vector2.new(head.X, head.Y - 30)
+    
+    local distance = player.Character and player.Character:FindFirstChild("HumanoidRootPart") and 
+        math.floor((player.Character.HumanoidRootPart.Position - self.target.HumanoidRootPart.Position).magnitude) or 0
+    
+    self.textLabel.Text = string.format("%s [%dm]", self.target.Name, distance)
+end
+
 function ESP:UpdateTeamColors()
-    local color = (self.target.TeamColor == player.TeamColor) and self.settings.green or self.settings.red
-    local shifterColor = (self.target.TeamColor == player.TeamColor) and self.settings.red or self.settings.green
+    local isTeammate = self.target.TeamColor == player.TeamColor
+    local color = isTeammate and self.settings.green or self.settings.red
+    local shifterColor = isTeammate and self.settings.red or self.settings.green
     
     for _, line in pairs(self.lines) do
-        line.Color = color
+        if line ~= self.lines.greenhealth and line ~= self.lines.healthbar then
+            line.Color = color
+        end
     end
     self.shifter.Color = shifterColor
+    self.textLabel.Color = color
 end
 
 function ESP:UpdateShifter(Size)
     if self.debounce == 0 then
         self.debounce = 1
         task.spawn(function()
-            -- Animation sequence
             for i = 0, Size.Y, 0.1 do
+                if not self.target or not self.target.Parent then break end
                 self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
                 task.wait()
             end
             for i = self.shifteroffset, 0, -0.1 do
+                if not self.target or not self.target.Parent then break end
                 self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
                 task.wait()
             end
             for i = 0, -Size.Y, -0.1 do
+                if not self.target or not self.target.Parent then break end
                 self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
                 task.wait()
             end
             for i = self.shifteroffset, 0, 0.1 do
+                if not self.target or not self.target.Parent then break end
                 self.shifteroffset = Lerp(self.shifteroffset, i, 0.5)
                 task.wait()
             end
@@ -295,7 +458,6 @@ function ESP:UpdateShifter(Size)
         end)
     end
     
-    -- Update shifter quad position
     local rootPart = self.target.HumanoidRootPart
     local shifter1 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, self.shifteroffset, -Size.Z)).p)
     local shifter2 = camera:WorldToViewportPoint((rootPart.CFrame * CFrame.new(-Size.X, self.shifteroffset, Size.Z)).p)
@@ -308,27 +470,66 @@ function ESP:UpdateShifter(Size)
     self.shifter.PointD = Vector2.new(shifter4.X, shifter4.Y)
 end
 
+function ESP:UpdateCharms(pos)
+    if self.charmsGrow then
+        self.charmsRadius = self.charmsRadius + 0.5
+        if self.charmsRadius >= 30 then
+            self.charmsGrow = false
+        end
+    else
+        self.charmsRadius = self.charmsRadius - 0.5
+        if self.charmsRadius <= 15 then
+            self.charmsGrow = true
+        end
+    end
+    
+    self.charms.Position = Vector2.new(pos.X, pos.Y)
+    self.charms.Radius = self.charmsRadius
+end
+
 function ESP:UpdateAutoThickness()
     if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then return end
     
-    local distance = (player.Character.HumanoidRootPart.Position - self.target.HumanoidRootPart.Position).magnitude
+    local targetPos = self:GetTargetPosition()
+    local distance = (player.Character.HumanoidRootPart.Position - targetPos).magnitude
     local value = math.clamp(1/distance*100, 0.1, 4)
     
     for _, line in pairs(self.lines) do
         line.Thickness = value
     end
     self.shifter.Thickness = value
+    self.charms.Thickness = value
 end
 
 function ESP:Show()
     if not self.visible then return end
     
-    for name, line in pairs(self.lines) do
-        if name ~= "Tracer" or self.settings.Tracers then
-            line.Visible = true
+    if self.settings.Box_Enabled then
+        for i = 1, 12 do
+            self.lines["line" .. i].Visible = true
         end
     end
-    self.shifter.Visible = true
+    
+    if self.settings.Tracers then
+        self.lines.Tracer.Visible = true
+    end
+    
+    if self.settings.HealthBar_Enabled and not self.isObject then
+        self.lines.healthbar.Visible = true
+        self.lines.greenhealth.Visible = true
+    end
+    
+    if self.settings.Text_Enabled then
+        self.textLabel.Visible = true
+    end
+    
+    if self.settings.Shifter_Enabled and not self.isObject then
+        self.shifter.Visible = true
+    end
+    
+    if self.settings.Charms_Enabled then
+        self.charms.Visible = true
+    end
 end
 
 function ESP:Hide()
@@ -336,6 +537,8 @@ function ESP:Hide()
         line.Visible = false
     end
     self.shifter.Visible = false
+    self.textLabel.Visible = false
+    self.charms.Visible = false
 end
 
 function ESP:SetVisible(visible)
@@ -351,55 +554,55 @@ function ESP:SetColor(color)
     self.color = color
     if not self.settings.Team_Check then
         for _, line in pairs(self.lines) do
-            line.Color = color
+            if line ~= self.lines.greenhealth and line ~= self.lines.healthbar then
+                line.Color = color
+            end
         end
+        self.textLabel.Color = color
     end
 end
 
 function ESP:Clear()
-    if self.connection then
-        self.connection:Disconnect()
-        self.connection = nil
+    if self.parentChangeConnection then
+        self.parentChangeConnection:Disconnect()
+        self.parentChangeConnection = nil
     end
     
     for _, line in pairs(self.lines) do
-        line:Remove()
+        if line then
+            line:Remove()
+        end
     end
-    self.shifter:Remove()
     
-    -- Unregister from config manager
+    if self.shifter then
+        self.shifter:Remove()
+    end
+    
+    if self.textLabel then
+        self.textLabel:Remove()
+    end
+    
+    if self.charms then
+        self.charms:Remove()
+    end
+    
     ESPConfig.instances[self] = nil
     
     self.lines = {}
     self.shifter = nil
+    self.textLabel = nil
+    self.charms = nil
 end
 
-function ESP:Start()
-    if self.connection then return end
-    
-    self.connection = runService.RenderStepped:Connect(function()
-        self:UpdateESP()
-    end)
-end
-
-function ESP:Stop()
-    if self.connection then
-        self.connection:Disconnect()
-        self.connection = nil
-    end
-    self:Hide()
-end
-
--- Global Config Management Functions
 function ESPConfig:UpdateAll(newConfig)
-    -- Update global settings
     for key, value in pairs(newConfig) do
         self.globalSettings[key] = value
     end
     
-    -- Update all ESP instances
     for espInstance, _ in pairs(self.instances) do
-        espInstance:UpdateSettings(newConfig)
+        if espInstance.target and espInstance.target.Parent then
+            espInstance:UpdateSettings(newConfig)
+        end
     end
     
     print("Updated " .. self:CountInstances() .. " ESP instances with new configuration")
@@ -413,68 +616,48 @@ function ESPConfig:CountInstances()
     return count
 end
 
-function ESPConfig:GetGlobalSettings()
-    return self.globalSettings
-end
-
-function ESPConfig:SetGlobalBox(enabled)
-    ESP:UpdateSettings({Box_Enabled = enabled})
-end
-
-function ESPConfig:SetGlobalHealthbar(enabled)
-    ESP:UpdateSettings({HealthBar_Enabled = enabled})
-end
-
-function ESPConfig:SetGlobalShifter(enabled)
-    ESP:UpdateSettings({Shifter_Enabled = enabled})
-end
-
-function ESPConfig:SetGlobalTracers(enabled)
-    ESP:UpdateSettings({Tracers = enabled})
-end
-
-function ESPConfig:SetGlobalThickness(thickness)
-    self:UpdateAll({
-        Box_Thickness = thickness,
-        Tracer_Thickness = thickness
-    })
-end
-
-function ESPConfig:SetGlobalColors(boxColor, tracerColor, shifterColor)
-    self:UpdateAll({
-        Box_Color = boxColor or self.globalSettings.Box_Color,
-        Tracer_Color = tracerColor or self.globalSettings.Tracer_Color,
-        Shifter_Color = shifterColor or self.globalSettings.Shifter_Color
-    })
-end
-
-function ESPConfig:SetGlobalTeamCheck(enabled)
-    self:UpdateAll({Team_Check = enabled})
-end
-
-function ESPConfig:SetGlobalAutoThickness(enabled)
-    self:UpdateAll({Autothickness = enabled})
-end
-
--- Main ESP Module Functions
-function ESPModule.AddESP(targetPath, color, settings)
-    local targetPlayer
+function ESPConfig:StartGlobalRender()
+    if self.renderConnection then return end
     
-    -- Handle different path types
+    self.renderConnection = runService.RenderStepped:Connect(function()
+        for espInstance, _ in pairs(self.instances) do
+            if espInstance.visible and espInstance.target and espInstance.target.Parent then
+                espInstance:UpdateESP()
+            end
+        end
+    end)
+end
+
+function ESPConfig:StopGlobalRender()
+    if self.renderConnection then
+        self.renderConnection:Disconnect()
+        self.renderConnection = nil
+    end
+end
+
+function ESPConfig:ClearAll()
+    for espInstance, _ in pairs(self.instances) do
+        espInstance:Clear()
+    end
+    self:StopGlobalRender()
+end
+
+function ESPModule.AddESP(targetPath, color, settings)
+    local targetObject
+    
     if typeof(targetPath) == "Instance" then
-        targetPlayer = targetPath
+        targetObject = targetPath
     elseif typeof(targetPath) == "string" then
-        targetPlayer = players:FindFirstChild(targetPath)
-        if not targetPlayer then
+        targetObject = players:FindFirstChild(targetPath)
+        if not targetObject then
             warn("Player not found: " .. targetPath)
             return nil
         end
     else
-        warn("Invalid target path. Expected Player instance or player name string.")
+        warn("Invalid target path. Expected Instance or player name string.")
         return nil
     end
     
-    -- Merge with global settings
     local finalSettings = {}
     for key, value in pairs(ESPConfig.globalSettings) do
         finalSettings[key] = value
@@ -485,11 +668,10 @@ function ESPModule.AddESP(targetPath, color, settings)
         end
     end
     
-    -- Create ESP instance
-    local esp = ESP.new(targetPlayer, color, finalSettings)
-    esp:Start()
+    local esp = ESP.new(targetObject, color, finalSettings)
     
-    -- Return control functions
+    ESPConfig:StartGlobalRender()
+    
     return {
         Clear = function()
             esp:Clear()
@@ -503,87 +685,225 @@ function ESPModule.AddESP(targetPath, color, settings)
             esp:SetColor(newColor)
         end,
         
-        Stop = function()
-            esp:Stop()
-        end,
-        
-        Start = function()
-            esp:Start()
-        end,
-        
         UpdateSettings = function(newSettings)
             esp:UpdateSettings(newSettings)
+        end,
+        
+        GetTarget = function()
+            return esp.target
         end
     }
 end
 
--- Batch ESP management
-function ESPModule.AddESPToAll(path, color, settings, excludeSelf)
+function ESPModule.AddESPToAll(params)
+    -- Extract parameters from table
+    local containerPath = params.container
+    local color = params.color or Color3.new(1, 1, 1)
+    local excludeSelf = params.excludeSelf or false
+    local settings = params.settings or {}
+    local nameFilter = params.nameFilter or nil -- Can be a string or table of strings
+    local parent = params.parent
+
     local espInstances = {}
-    local LIST = path:GetChildren() or players:GetPlayers()
-    print("Adding ESP to " .. #LIST .. " players")
-    for _, plr in pairs(LIST) do
-        if excludeSelf == false or plr ~= player.Character then
-            local esp = ESPModule.AddESP(plr, color, settings)
+    local connections = {}
+    
+    local function isCharacterModel(obj)
+        local current = obj
+        while current do
+            if current:FindFirstChild("Humanoid") and current:FindFirstChild("HumanoidRootPart") then
+                return true, current
+            end
+            current = current.Parent
+        end
+        return false, nil
+    end
+
+    local function nameMatches(objName)
+        if not nameFilter then return true end
+        if type(nameFilter) == "string" then
+            return objName == nameFilter
+        elseif type(nameFilter) == "table" then
+            for _, name in ipairs(nameFilter) do
+                if objName == name then return true end
+            end
+        end
+        return false
+    end
+
+    local isInParentName = function(obj)
+        return obj.Parent.Name == parent
+    end
+
+    local function addESPToObject(obj)
+        if excludeSelf and obj == player.Character then return end
+        if not nameMatches(obj.Name) then return end
+        if not isInParentName(obj) then return end
+
+        local isCharacter, characterModel = isCharacterModel(obj)
+        local hasHumanoid = obj:FindFirstChild("Humanoid") and obj:FindFirstChild("HumanoidRootPart")
+        local isObject = obj:IsA("Model") or obj:IsA("BasePart") or  obj:IsA("Part") or obj:IsA("MeshPart") or obj:FindFirstChild("MeshPart") or obj:FindFirstChild("Part")
+
+        if isCharacter and characterModel and not espInstances[characterModel] then
+            local esp = ESPModule.AddESP(characterModel, color, settings)
             if esp then
-                espInstances[plr.Name] = esp
+                espInstances[characterModel] = esp
+                connections[characterModel] = characterModel.AncestryChanged:Connect(function()
+                    if not characterModel.Parent then
+                        if espInstances[characterModel] then
+                            espInstances[characterModel].Clear()
+                            espInstances[characterModel] = nil
+                        end
+                    end
+                end)
+            end
+        elseif (hasHumanoid or isObject) and not isCharacter then
+            local esp = ESPModule.AddESP(obj, color, settings)
+            if esp then
+                espInstances[obj] = esp
+                connections[obj] = obj.AncestryChanged:Connect(function()
+                    if not obj.Parent then
+                        if espInstances[obj] then
+                            espInstances[obj].Clear()
+                            espInstances[obj] = nil
+                        end
+                    end
+                end)
             end
         end
     end
-    
-    -- Handle new players
-    local newPlayerConnection = path.ChildAdded:Connect(function(newPlayer)
-        if excludeSelf == false or newPlayer ~= player then
-            espInstances[newPlayer.Name] = ESPModule.AddESP(newPlayer, color, settings)
+
+    local function scanContainer()
+        local objects = containerPath:GetDescendants()
+        for _, obj in pairs(objects) do
+            if (obj:IsA("Model") or obj:IsA("Part") or obj:IsA("MeshPart")) and not espInstances[obj] then
+                addESPToObject(obj)
+            end
+        end
+    end
+
+    scanContainer()
+
+    local addedConnection = containerPath.DescendantAdded:Connect(function(obj)
+        if obj:IsA("Model") or obj:IsA("Part") or obj:IsA("MeshPart") then
+            task.wait(0.1)
+            addESPToObject(obj)
         end
     end)
-    
-    -- Handle leaving players
-    local playerRemovedConnection = path.ChildRemoved:Connect(function(leavingPlayer)
-        if espInstances[leavingPlayer.Name] then
-            espInstances[leavingPlayer.Name].Clear()
-            espInstances[leavingPlayer.Name] = nil
+
+    local removedConnection = containerPath.DescendantRemoving:Connect(function(obj)
+        if espInstances[obj] then
+            espInstances[obj].Clear()
+            espInstances[obj] = nil
+            if connections[obj] then
+                connections[obj]:Disconnect()
+                connections[obj] = nil
+            end
         end
     end)
-    
+
+    local cleanupConnection = task.spawn(function()
+        while true do
+            task.wait(5)
+            for obj, esp in pairs(espInstances) do
+                if not obj.Parent then
+                    esp.Clear()
+                    espInstances[obj] = nil
+                    if connections[obj] then
+                        connections[obj]:Disconnect()
+                        connections[obj] = nil
+                    end
+                end
+            end
+            scanContainer()
+        end
+    end)
+
+    print("Added ESP to container with " .. tostring(#espInstances) .. " objects")
+
     return {
         ClearAll = function()
             for _, esp in pairs(espInstances) do
                 esp.Clear()
             end
+            for _, connection in pairs(connections) do
+                connection:Disconnect()
+            end
+            addedConnection:Disconnect()
+            removedConnection:Disconnect()
+            if cleanupConnection then
+                task.cancel(cleanupConnection)
+            end
             espInstances = {}
-            newPlayerConnection:Disconnect()
-            playerRemovedConnection:Disconnect()
+            connections = {}
         end,
-        
+
         SetVisible = function(visible)
             for _, esp in pairs(espInstances) do
                 esp.Visible(visible)
             end
         end,
-        
+
         SetColor = function(newColor)
             for _, esp in pairs(espInstances) do
                 esp.SetColor(newColor)
             end
         end,
 
-        Start = function()
-            for _, esp in pairs(espInstances) do
-                esp.Start()
+        GetESP = function(obj)
+            return espInstances[obj]
+        end,
+
+        GetCount = function()
+            local count = 0
+            for _ in pairs(espInstances) do
+                count = count + 1
             end
+            return count
         end,
-        
-        GetESP = function(playerName)
-            return espInstances[playerName]
-        end,
-        
+
         UpdateAllSettings = function(newSettings)
             for _, esp in pairs(espInstances) do
                 esp.UpdateSettings(newSettings)
             end
+        end,
+
+        RefreshAll = function()
+            scanContainer()
         end
     }
+end
+
+ESPModule.SetGlobalBox = function(enabled)
+    ESPConfig:UpdateAll({Box_Enabled = enabled})
+end
+
+ESPModule.SetGlobalHealthbar = function(enabled)
+    ESPConfig:UpdateAll({HealthBar_Enabled = enabled})
+end
+
+ESPModule.SetGlobalText = function(enabled)
+    ESPConfig:UpdateAll({Text_Enabled = enabled})
+end
+
+ESPModule.SetGlobalShifter = function(enabled)
+    ESPConfig:UpdateAll({Shifter_Enabled = enabled})
+end
+
+ESPModule.SetGlobalTracers = function(enabled)
+    ESPConfig:UpdateAll({Tracers = enabled})
+end
+
+ESPModule.SetGlobalColors = function(boxColor, tracerColor, shifterColor, textColor)
+    ESPConfig:UpdateAll({
+        Box_Color = boxColor or ESPConfig.globalSettings.Box_Color,
+        Tracer_Color = tracerColor or ESPConfig.globalSettings.Tracer_Color,
+        Shifter_Color = shifterColor or ESPConfig.globalSettings.Shifter_Color,
+        Text_Color = textColor or ESPConfig.globalSettings.Text_Color
+    })
+end
+
+ESPModule.ClearAll = function()
+    ESPConfig:ClearAll()
 end
 
 return ESPModule
