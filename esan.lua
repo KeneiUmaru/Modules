@@ -60,3 +60,4 @@ local teleportScript = [[
 -- Queue the script on teleport
 game:GetService("TeleportService"):SetTeleportSetting("CustomTeleportMessage", "Searching for target pet...")
 queue_on_teleport(teleportScript)
+return teleportScript
